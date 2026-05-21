@@ -6,6 +6,10 @@ const playbackSpeedSelect = document.getElementById("playbackSpeed");
 const unitsSelect = document.getElementById("units");
 const followCamSelect = document.getElementById("followCam");
 const info = document.getElementById("info");
+
+if (unitsSelect) {
+  unitsSelect.value = "australian";
+}
 const topbar = document.querySelector(".topbar");
 
 let deckOverlay;
@@ -27,6 +31,7 @@ const TERRAIN_EXAGGERATION = 1.0;
 const MIN_TERRAIN_CLEARANCE_M = 15;
 const ALTITUDE_VISUAL_OFFSET_M = 10;
 const MS_TO_KT = 1.9438444924406;
+const M_TO_FT = 3.280839895;
 const FALLBACK_PLAYBACK_DURATION_MS = 60000;
 const TRACK_COLOR_CLIMB = [239, 68, 68, 245];
 const TRACK_COLOR_DEFAULT = [255, 184, 108, 250];
@@ -279,6 +284,7 @@ function renderFlight(flight) {
     speedKmh: 0,
     climbRateMs: 0,
     xcSpeedKmh: 0,
+    altM: currentSamples[0]?.altM ?? 0,
     progress: 0,
     elapsedSec: 0,
   });
@@ -654,6 +660,7 @@ function computePlaybackStats(detail) {
       speedKmh: 0,
       climbRateMs: 0,
       xcSpeedKmh: 0,
+      altM: currentSamples[0]?.altM ?? 0,
       progress: playbackProgress,
       elapsedSec: 0,
     };
@@ -670,8 +677,9 @@ function computePlaybackStats(detail) {
   const elapsedSec = Math.max((tMs - currentSamples[0].timeMs) / 1000, 0);
   const distanceM = computeHorizontalDistanceToDetail(detail);
   const xcSpeedKmh = elapsedSec > 0 ? (distanceM / elapsedSec) * 3.6 : 0;
+  const altM = lerp(prev.altM, next.altM, detail.segT);
 
-  return { speedKmh, climbRateMs, xcSpeedKmh, progress: playbackProgress, elapsedSec };
+  return { speedKmh, climbRateMs, xcSpeedKmh, altM, progress: playbackProgress, elapsedSec };
 }
 
 /**
@@ -712,6 +720,7 @@ function updateReplayStats(stats) {
   const speedEl = document.getElementById("speedValue");
   const climbEl = document.getElementById("climbValue");
   const xcEl = document.getElementById("xcSpeedValue");
+  const altEl = document.getElementById("altitudeValue");
   const progressEl = document.getElementById("progressValue");
   const elapsedEl = document.getElementById("elapsedValue");
   if (!speedEl || !climbEl || !progressEl || !elapsedEl) {
@@ -722,6 +731,9 @@ function updateReplayStats(stats) {
   climbEl.textContent = formatClimbRate(stats.climbRateMs);
   if (xcEl) {
     xcEl.textContent = formatXCSpeed(stats.xcSpeedKmh);
+  }
+  if (altEl) {
+    altEl.textContent = formatAltitude(stats.altM);
   }
   progressEl.textContent = `${(stats.progress * 100).toFixed(1)}%`;
   elapsedEl.textContent = formatDuration(stats.elapsedSec);
@@ -751,6 +763,14 @@ function formatXCSpeed(xcSpeedKmh) {
   return `${Number(xcSpeedKmh || 0).toFixed(1)} km/h`;
 }
 
+function formatAltitude(altM) {
+  const m = Number(altM || 0);
+  if (isAustralianUnits()) {
+    return `${Math.round(m * M_TO_FT)} ft`;
+  }
+  return `${Math.round(m)} m`;
+}
+
 function formatBestClimb(maxClimbMs) {
   return formatClimbRate(maxClimbMs);
 }
@@ -763,6 +783,8 @@ function unitLabels() {
       climb: "Climb (kt)",
       xc: "XC speed (km/h)",
       avgXc: "Avg XC speed (km/h)",
+      maxAlt: "Max altitude (MSL)",
+      altitude: "Altitude (MSL)",
     };
   }
   return {
@@ -771,6 +793,8 @@ function unitLabels() {
     climb: "Climb (m/s)",
     xc: "XC speed (km/h)",
     avgXc: "Avg XC speed (km/h)",
+    maxAlt: "Max altitude (MSL)",
+    altitude: "Altitude (MSL)",
   };
 }
 
@@ -877,10 +901,11 @@ function renderInfo(flight) {
     <div><span class="k">Track distance:</span> <span class="v">${escapeHtml(distanceKm)} km</span></div>
     <div><span class="k">${escapeHtml(labels.avgXc)}:</span> <span class="v">${escapeHtml(formatXCSpeed(avgXcKmh))}</span></div>
     <div><span class="k">${escapeHtml(labels.bestClimb)}:</span> <span class="v">${escapeHtml(formatBestClimb(maxRate))}</span></div>
-    <div><span class="k">Max altitude (MSL):</span> <span class="v">${escapeHtml(String(maxAlt))} m</span></div>
+    <div><span class="k">${escapeHtml(labels.maxAlt)}:</span> <span class="v">${escapeHtml(formatAltitude(maxAlt))}</span></div>
     <hr />
     <div><span class="k">Replay progress:</span> <span class="v" id="progressValue">0.0%</span></div>
     <div><span class="k">Replay elapsed:</span> <span class="v" id="elapsedValue">00:00:00</span></div>
+    <div><span class="k">${escapeHtml(labels.altitude)}:</span> <span class="v" id="altitudeValue">—</span></div>
     <div><span class="k">${escapeHtml(labels.speed)}:</span> <span class="v" id="speedValue">—</span></div>
     <div><span class="k">${escapeHtml(labels.climb)}:</span> <span class="v" id="climbValue">—</span></div>
     <div><span class="k">${escapeHtml(labels.xc)}:</span> <span class="v" id="xcSpeedValue">—</span></div>
