@@ -248,7 +248,7 @@ function renderFlight(flight) {
   playbackProgress = 0;
   playBtn.disabled = false;
   playBtn.textContent = "Play";
-  const startDetail = { position: currentPath[0], segIndex: 1, segT: 0 };
+  const startDetail = interpolatePathByTime(0);
   latestPlaybackDetail = startDetail;
   renderDeckLayers(currentPath, {
     position: currentPath[0],
@@ -318,11 +318,11 @@ function renderDeckLayers(path, marker, detail, revealTrack) {
         getPosition: (d) => d.position,
         getAngle: (d) => d.angle || 0,
         getIcon: () => sailplaneIcon,
-        sizeUnits: "meters",
-        getSize: 120,
-        sizeMinPixels: 28,
-        sizeMaxPixels: 64,
-        billboard: false,
+        sizeUnits: "pixels",
+        getSize: 40,
+        sizeMinPixels: 24,
+        sizeMaxPixels: 48,
+        billboard: true,
         parameters: { depthTest: true },
       }),
     ],
@@ -356,27 +356,26 @@ function rerenderTrackForCurrentState() {
     return;
   }
 
-  const detail = latestPlaybackDetail || { position: currentPath[0], segIndex: 1, segT: 0 };
+  const detail = latestPlaybackDetail || interpolatePathByTime(playbackProgress);
   const revealTrack = isPlaying || (playbackProgress > 0 && playbackProgress < 1);
   renderDeckLayers(currentPath, markerFromDetail(detail), detail, revealTrack);
 }
 
 function createSailplaneIcon() {
-  const svg = `
-<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
-  <path d="M10 46 L86 46 L84 52 L12 52 Z" fill="#1a1a2e"/>
-  <path d="M44 14 L52 14 L55 70 L41 70 Z" fill="#2d3748"/>
-  <ellipse cx="48" cy="20" rx="6" ry="9" fill="#4a5568"/>
-  <path d="M36 66 L60 66 L58 76 L38 76 Z" fill="#1a1a2e"/>
-  <path d="M46 70 L50 70 L48 88 L48 88 Z" fill="#2d3748"/>
+  // Nose points up (+Y). deck.gl rotates clockwise from north (bearing).
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <path d="M32 6 L36 22 L28 22 Z" fill="#f8fafc" stroke="#0f172a" stroke-width="1.25" stroke-linejoin="round"/>
+  <path d="M30 22 L34 22 L33 46 L31 46 Z" fill="#e2e8f0" stroke="#0f172a" stroke-width="1.25"/>
+  <path d="M8 30 L56 30 L54 34 L10 34 Z" fill="#f8fafc" stroke="#0f172a" stroke-width="1.25" stroke-linejoin="round"/>
+  <path d="M24 44 L40 44 L38 50 L26 50 Z" fill="#f8fafc" stroke="#0f172a" stroke-width="1.25" stroke-linejoin="round"/>
 </svg>`;
   return {
     id: "sailplane",
-    url: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
-    width: 96,
-    height: 96,
-    anchorX: 48,
-    anchorY: 48,
+    url: `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+    width: 64,
+    height: 64,
+    anchorX: 32,
+    anchorY: 32,
   };
 }
 
@@ -442,7 +441,7 @@ function applyBaseView(mode) {
 }
 
 function startPlayback() {
-  if (currentPath.length < 2 || totalDistanceM <= 0) {
+  if (currentPath.length < 2 || currentSamples.length < 2 || currentFlightDurationMs <= 0) {
     return;
   }
   isPlaying = true;
@@ -477,7 +476,7 @@ function tickPlayback(ts) {
 
   const elapsed = ts - playbackStartTs;
   playbackProgress = clamp(elapsed / getPlaybackDurationMs(), 0, 1);
-  const detail = interpolatePathDetailed(currentPath, cumulativeDistances, totalDistanceM, playbackProgress);
+  const detail = interpolatePathByTime(playbackProgress);
   latestPlaybackDetail = detail;
   renderDeckLayers(currentPath, markerFromDetail(detail), detail, true);
   updateReplayStats(computePlaybackStats(detail));
@@ -622,40 +621,53 @@ function buildPathMetrics(path) {
   totalDistanceM = total;
 }
 
-function interpolatePathDetailed(path, cumulative, totalDistance, progress) {
-  if (path.length === 0) {
-    return { position: null, segIndex: 0, segT: 0 };
-  }
-  if (path.length === 1 || totalDistance <= 0) {
-    return { position: path[0], segIndex: 0, segT: 0 };
+/** Replay position from IGC timestamps (not track distance). */
+function interpolatePathByTime(progress) {
+  if (!currentSamples.length || !currentPath.length) {
+    return { position: null, segIndex: 0, segT: 0, flightTimeMs: 0 };
   }
 
-  const target = progress * totalDistance;
+  const startMs = currentSamples[0].timeMs;
+  const endMs = currentSamples[currentSamples.length - 1].timeMs;
+  const durationMs = Math.max(endMs - startMs, 1);
+  const targetMs = startMs + clamp(progress, 0, 1) * durationMs;
+
+  if (currentPath.length === 1) {
+    return { position: currentPath[0], segIndex: 0, segT: 0, flightTimeMs: targetMs };
+  }
+
   let idx = 1;
-  while (idx < cumulative.length && cumulative[idx] < target) {
+  while (idx < currentSamples.length && currentSamples[idx].timeMs < targetMs) {
     idx += 1;
   }
 
-  if (idx >= path.length) {
-    return { position: path[path.length - 1], segIndex: path.length - 1, segT: 1 };
+  if (idx >= currentSamples.length) {
+    const last = currentPath.length - 1;
+    return {
+      position: currentPath[last],
+      segIndex: last,
+      segT: 1,
+      flightTimeMs: targetMs,
+    };
   }
 
-  const prevDist = cumulative[idx - 1];
-  const nextDist = cumulative[idx];
-  const segLen = Math.max(nextDist - prevDist, 1e-6);
-  const t = (target - prevDist) / segLen;
-  const a = path[idx - 1];
-  const b = path[idx];
+  const prevSample = currentSamples[idx - 1];
+  const nextSample = currentSamples[idx];
+  const dt = Math.max(nextSample.timeMs - prevSample.timeMs, 1);
+  const t = clamp((targetMs - prevSample.timeMs) / dt, 0, 1);
+  const a = currentPath[idx - 1];
+  const b = currentPath[idx];
 
   return {
     position: [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)],
     segIndex: idx,
     segT: t,
+    flightTimeMs: targetMs,
   };
 }
 
 function computePlaybackStats(detail) {
-  if (!currentSamples.length || detail.segIndex <= 0 || detail.segIndex >= currentSamples.length) {
+  if (!currentSamples.length || !detail) {
     return {
       speedKmh: 0,
       climbRateMs: 0,
@@ -666,20 +678,99 @@ function computePlaybackStats(detail) {
     };
   }
 
-  const prev = currentSamples[detail.segIndex - 1];
-  const next = currentSamples[detail.segIndex];
-  const dt = Math.max((next.timeMs - prev.timeMs) / 1000, 0.001);
-  const horizontalM = haversineMeters(prev.lat, prev.lon, next.lat, next.lon);
-  const speedKmh = (horizontalM / dt) * 3.6;
-
-  const tMs = prev.timeMs + (next.timeMs - prev.timeMs) * detail.segT;
+  const startMs = currentSamples[0].timeMs;
+  const tMs = detail.flightTimeMs ?? startMs;
+  const elapsedSec = Math.max((tMs - startMs) / 1000, 0);
+  const speedKmh = computeSpeedKmhAroundTime(tMs, 10000);
   const climbRateMs = computeWindowedClimbRateMs(tMs, detail.segIndex, 8000);
-  const elapsedSec = Math.max((tMs - currentSamples[0].timeMs) / 1000, 0);
-  const distanceM = computeHorizontalDistanceToDetail(detail);
+  const distanceM = computeHorizontalDistanceToTime(tMs);
   const xcSpeedKmh = elapsedSec > 0 ? (distanceM / elapsedSec) * 3.6 : 0;
-  const altM = lerp(prev.altM, next.altM, detail.segT);
+  const altM = interpolateAltitudeAtTime(tMs);
 
   return { speedKmh, climbRateMs, xcSpeedKmh, altM, progress: playbackProgress, elapsedSec };
+}
+
+function interpolateAltitudeAtTime(targetMs) {
+  if (!currentSamples.length) {
+    return 0;
+  }
+  if (currentSamples.length === 1) {
+    return currentSamples[0].altM;
+  }
+
+  let idx = 1;
+  while (idx < currentSamples.length && currentSamples[idx].timeMs < targetMs) {
+    idx += 1;
+  }
+  if (idx >= currentSamples.length) {
+    return currentSamples[currentSamples.length - 1].altM;
+  }
+
+  const prev = currentSamples[idx - 1];
+  const next = currentSamples[idx];
+  const dt = Math.max(next.timeMs - prev.timeMs, 1);
+  const t = clamp((targetMs - prev.timeMs) / dt, 0, 1);
+  return lerp(prev.altM, next.altM, t);
+}
+
+function computeSpeedKmhAroundTime(targetMs, windowMs) {
+  if (currentSamples.length < 2) {
+    return 0;
+  }
+
+  const halfWindowMs = Math.max(windowMs, 2000) / 2;
+  let left = 0;
+  let right = currentSamples.length - 1;
+
+  for (let i = 0; i < currentSamples.length; i++) {
+    if (currentSamples[i].timeMs <= targetMs - halfWindowMs) {
+      left = i;
+    }
+    if (currentSamples[i].timeMs <= targetMs + halfWindowMs) {
+      right = i;
+    }
+  }
+
+  if (right <= left) {
+    right = Math.min(left + 1, currentSamples.length - 1);
+  }
+
+  const dtSec = (currentSamples[right].timeMs - currentSamples[left].timeMs) / 1000;
+  if (dtSec < 1) {
+    return 0;
+  }
+
+  let distM = 0;
+  for (let i = left + 1; i <= right; i++) {
+    const a = currentSamples[i - 1];
+    const b = currentSamples[i];
+    distM += haversineMeters(a.lat, a.lon, b.lat, b.lon);
+  }
+
+  return (distM / dtSec) * 3.6;
+}
+
+function computeHorizontalDistanceToTime(targetMs) {
+  if (currentSamples.length < 2) {
+    return 0;
+  }
+
+  let total = 0;
+  for (let i = 1; i < currentSamples.length; i++) {
+    const a = currentSamples[i - 1];
+    const b = currentSamples[i];
+    if (b.timeMs <= targetMs) {
+      total += haversineMeters(a.lat, a.lon, b.lat, b.lon);
+      continue;
+    }
+    if (a.timeMs < targetMs) {
+      const dt = Math.max(b.timeMs - a.timeMs, 1);
+      const t = clamp((targetMs - a.timeMs) / dt, 0, 1);
+      total += haversineMeters(a.lat, a.lon, b.lat, b.lon) * t;
+    }
+    break;
+  }
+  return total;
 }
 
 /**
