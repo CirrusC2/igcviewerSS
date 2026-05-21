@@ -11,13 +11,14 @@ import (
 
 // Fix is one position record in an IGC track (B record).
 type Fix struct {
-	Time            time.Time `json:"time"`
-	Latitude        float64   `json:"latitude"`
-	Longitude       float64   `json:"longitude"`
-	Validity        string    `json:"validity"`
-	PressureAltM    int       `json:"pressureAltM"`
-	GPSAltM         int       `json:"gpsAltM"`
-	RecordLineIndex int       `json:"recordLineIndex"`
+	Time             time.Time `json:"time"`
+	SecondsFromStart int       `json:"secondsFromStart"`
+	Latitude         float64   `json:"latitude"`
+	Longitude        float64   `json:"longitude"`
+	Validity         string    `json:"validity"`
+	PressureAltM     int       `json:"pressureAltM"`
+	GPSAltM          int       `json:"gpsAltM"`
+	RecordLineIndex  int       `json:"recordLineIndex"`
 }
 
 // Flight contains parsed metadata and fixes from an IGC file.
@@ -83,16 +84,21 @@ func Parse(r io.Reader) (*Flight, error) {
 				maxAlt = fix.GPSAltM
 			}
 
-			if haveFlightDate {
-				fix.Time = flight.Date.Add(time.Duration(rolloverDays)*24*time.Hour +
-					time.Duration(clockSec)*time.Second)
-			}
 			flight.Fixes = append(flight.Fixes, fix)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
+
+	if !haveFlightDate {
+		if d, ok := dateFromHeaders(flight.Headers); ok {
+			flight.Date = d
+			haveFlightDate = true
+		}
+	}
+	applyFixTimes(flight, clockSecsAbs, haveFlightDate)
+
 	flight.MaxClimb = computeMaxWindowedClimbRate(clockSecsAbs, gpsAltsM, maxClimbWindowSec)
 	flight.FixCount = len(flight.Fixes)
 	flight.MaxAlt = maxAlt
@@ -163,24 +169,73 @@ func computeMaxWindowedClimbRate(timesSec []int, altsM []int, windowSec float64)
 }
 
 func parseDateHeader(line string) (time.Time, bool) {
-	// Format: HFDTEddmmyy
-	idx := strings.Index(line, "HFDTE")
-	if idx < 0 || len(line) < idx+11 {
+	upper := strings.ToUpper(line)
+	idx := strings.Index(upper, "HFDTE")
+	if idx < 0 {
 		return time.Time{}, false
 	}
-	raw := line[idx+5 : idx+11]
-	day, err1 := strconv.Atoi(raw[0:2])
-	month, err2 := strconv.Atoi(raw[2:4])
-	year2, err3 := strconv.Atoi(raw[4:6])
+	return parseDateDigits(line[idx+5:])
+}
+
+func dateFromHeaders(headers map[string]string) (time.Time, bool) {
+	for key, value := range headers {
+		upperKey := strings.ToUpper(key)
+		if strings.Contains(upperKey, "DTE") || strings.Contains(upperKey, "DATE") {
+			if d, ok := parseDateDigits(value); ok {
+				return d, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseDateDigits(raw string) (time.Time, bool) {
+	var digits strings.Builder
+	for _, r := range raw {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	d := digits.String()
+	if len(d) < 6 {
+		return time.Time{}, false
+	}
+	if len(d) > 6 {
+		d = d[len(d)-6:]
+	}
+	day, err1 := strconv.Atoi(d[0:2])
+	month, err2 := strconv.Atoi(d[2:4])
+	year2, err3 := strconv.Atoi(d[4:6])
 	if err1 != nil || err2 != nil || err3 != nil {
+		return time.Time{}, false
+	}
+	if day < 1 || day > 31 || month < 1 || month > 12 {
 		return time.Time{}, false
 	}
 	year := 2000 + year2
 	if year2 >= 80 {
 		year = 1900 + year2
 	}
-	d := time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC)
-	return d, true
+	return time.Date(year, time.Month(month), day, 0, 0, 0, 0, time.UTC), true
+}
+
+func applyFixTimes(flight *Flight, clockSecsAbs []int, haveFlightDate bool) {
+	n := len(flight.Fixes)
+	if n == 0 || len(clockSecsAbs) != n {
+		return
+	}
+
+	base := flight.Date
+	if !haveFlightDate {
+		base = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+	startClock := clockSecsAbs[0]
+	for i := range flight.Fixes {
+		flight.Fixes[i].SecondsFromStart = clockSecsAbs[i] - startClock
+		flight.Fixes[i].Time = base.Add(
+			time.Duration(clockSecsAbs[i]) * time.Second,
+		)
+	}
 }
 
 func parseGenericHeader(line string, headers map[string]string) {

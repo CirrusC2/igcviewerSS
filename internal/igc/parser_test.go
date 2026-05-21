@@ -32,6 +32,25 @@ func TestParseBasic(t *testing.T) {
 	}
 }
 
+func TestParseWithoutDateHeaderStillAssignsMonotonicTimes(t *testing.T) {
+	const data = "" +
+		"HFPLTPILOT: Test Pilot\n" +
+		"B0914204739821N01147631EA0156701606\n" +
+		"B0915204739823N01147627EA0156601604\n" +
+		"B1015204739825N01147625EA0156501602\n"
+
+	flight, err := Parse(strings.NewReader(data))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+	if !flight.Fixes[2].Time.After(flight.Fixes[0].Time) {
+		t.Fatalf("expected increasing timestamps without HFDTE")
+	}
+	if flight.Fixes[2].SecondsFromStart-flight.Fixes[0].SecondsFromStart != 3660 {
+		t.Fatalf("expected 3660s span, got %d", flight.Fixes[2].SecondsFromStart)
+	}
+}
+
 func TestParseMaxClimbUsesWindowedSmoothing(t *testing.T) {
 	var b strings.Builder
 	b.WriteString("HFDTE020623\n")

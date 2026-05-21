@@ -228,12 +228,7 @@ function renderFlight(flight) {
   stopPlayback();
 
   const coords = flight.geojson.features[0].geometry.coordinates;
-  currentSamples = (flight.samples || []).map((s) => ({
-    lon: Number(s.lon),
-    lat: Number(s.lat),
-    altM: Number(s.altM),
-    timeMs: new Date(s.time).getTime(),
-  }));
+  currentSamples = buildSamplesFromFlight(flight);
 
   const start = coords[0];
   const end = coords[coords.length - 1];
@@ -747,7 +742,12 @@ function computeSpeedKmhAroundTime(targetMs, windowMs) {
     distM += haversineMeters(a.lat, a.lon, b.lat, b.lon);
   }
 
-  return (distM / dtSec) * 3.6;
+  const speedKmh = (distM / dtSec) * 3.6;
+  // Guard corrupt timestamps / GPS spikes (gliders stay well below ~300 km/h).
+  if (!Number.isFinite(speedKmh) || speedKmh > 360) {
+    return 0;
+  }
+  return speedKmh;
 }
 
 function computeHorizontalDistanceToTime(targetMs) {
@@ -968,12 +968,75 @@ function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
 }
 
+function buildSamplesFromFlight(flight) {
+  const flightDateMs = parseFlightDateMs(flight);
+  const raw = (flight.samples || []).map((s) => {
+    const sec = Number(s.secondsFromStart);
+    let timeMs;
+    if (flightDateMs != null && Number.isFinite(sec)) {
+      timeMs = flightDateMs + sec * 1000;
+    } else {
+      timeMs = new Date(s.time).getTime();
+    }
+    return {
+      lon: Number(s.lon),
+      lat: Number(s.lat),
+      altM: Number(s.altM),
+      timeMs,
+    };
+  });
+  return ensureMonotonicSampleTimes(raw);
+}
+
+function parseFlightDateMs(flight) {
+  if (flight.flightDate) {
+    const parts = String(flight.flightDate).split("-").map(Number);
+    if (parts.length === 3 && parts.every((n) => Number.isFinite(n))) {
+      return Date.UTC(parts[0], parts[1] - 1, parts[2]);
+    }
+  }
+  const start = new Date(flight.startTime);
+  if (!Number.isNaN(start.getTime()) && start.getUTCFullYear() > 1980) {
+    return Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  }
+  return null;
+}
+
+function ensureMonotonicSampleTimes(samples) {
+  if (samples.length < 2) {
+    return samples;
+  }
+
+  const duration = samples[samples.length - 1].timeMs - samples[0].timeMs;
+  if (duration > 1000) {
+    return samples;
+  }
+
+  const deltas = [];
+  for (let i = 1; i < samples.length; i++) {
+    const d = samples[i].timeMs - samples[i - 1].timeMs;
+    if (d > 0) {
+      deltas.push(d);
+    }
+  }
+  deltas.sort((a, b) => a - b);
+  const intervalMs = deltas.length ? deltas[Math.floor(deltas.length / 2)] : 4000;
+  const firstYear = new Date(samples[0].timeMs).getUTCFullYear();
+  const base =
+    firstYear > 1980 ? samples[0].timeMs : Date.UTC(1970, 0, 1);
+
+  return samples.map((s, i) => ({
+    ...s,
+    timeMs: base + i * intervalMs,
+  }));
+}
+
 function renderInfo(flight) {
   const headers = flight.headers || {};
   const pilot = headers["FPLTPILOT"] || headers["OPLTPILOT"] || "Unknown";
   const glider = headers["FGTYGLIDERTYPE"] || headers["OGTYGLIDERTYPE"]|| "Unknown";
-  const start = formatDate(flight.startTime);
-  const end = formatDate(flight.endTime);
+  const start = formatDateTimeMs(currentSamples[0]?.timeMs);
+  const end = formatDateTimeMs(currentSamples.at(-1)?.timeMs);
   const maxRate = Number(flight.MaxClimb || 0);
   const maxAlt = flight.MaxAlt;
   const labels = unitLabels();
@@ -1023,13 +1086,16 @@ function isFollowCamEnabled() {
   return (followCamSelect?.value || "on") === "on";
 }
 
-function formatDate(v) {
-  if (!v) {
+function formatDateTimeMs(ms) {
+  if (ms == null || !Number.isFinite(ms)) {
     return "N/A";
   }
-  const d = new Date(v);
+  const d = new Date(ms);
   if (Number.isNaN(d.getTime())) {
     return "N/A";
+  }
+  if (d.getUTCFullYear() < 1980) {
+    return `${d.toISOString().slice(11, 19)} UTC (date unknown)`;
   }
   return d.toLocaleString();
 }
