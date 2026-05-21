@@ -36,6 +36,7 @@ body {
 
 .controls {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
   align-items: center;
 }
@@ -76,7 +77,7 @@ main {
   left: 1rem;
   top: 1rem;
   z-index: 2;
-  width: 290px;
+  width: 320px;
   max-height: calc(100% - 2rem);
   overflow: auto;
   padding: 0.9rem;

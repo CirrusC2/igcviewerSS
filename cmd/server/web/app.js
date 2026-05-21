@@ -3,6 +3,7 @@ const uploadBtn = document.getElementById("uploadBtn");
 const playBtn = document.getElementById("playBtn");
 const baseViewSelect = document.getElementById("baseView");
 const playbackSpeedSelect = document.getElementById("playbackSpeed");
+const unitsSelect = document.getElementById("units");
 const followCamSelect = document.getElementById("followCam");
 const info = document.getElementById("info");
 const topbar = document.querySelector(".topbar");
@@ -13,16 +14,20 @@ let currentSamples = [];
 let currentSegments = [];
 let cumulativeDistances = [];
 let totalDistanceM = 0;
+let totalHorizontalDistanceM = 0;
+let currentFlightDurationMs = 0;
+let currentFlightSummary = null;
 let animationFrameId = null;
 let isPlaying = false;
 let playbackProgress = 0;
 let playbackStartTs = 0;
-const paragliderIcon = createParagliderIcon();
+const sailplaneIcon = createSailplaneIcon();
 
 const TERRAIN_EXAGGERATION = 1.0;
 const MIN_TERRAIN_CLEARANCE_M = 15;
 const ALTITUDE_VISUAL_OFFSET_M = 10;
-const BASE_PLAYBACK_DURATION_MS = 60000;
+const MS_TO_KT = 1.9438444924406;
+const FALLBACK_PLAYBACK_DURATION_MS = 60000;
 const TRACK_COLOR_CLIMB = [239, 68, 68, 245];
 const TRACK_COLOR_DEFAULT = [255, 184, 108, 250];
 const TRACK_WIDTH_METERS = 1;
@@ -189,6 +194,15 @@ followCamSelect?.addEventListener("change", () => {
   updateFollowCamera(latestPlaybackDetail);
 });
 
+unitsSelect?.addEventListener("change", () => {
+  if (currentFlightSummary) {
+    renderInfo(currentFlightSummary);
+  }
+  if (latestPlaybackDetail) {
+    updateReplayStats(computePlaybackStats(latestPlaybackDetail));
+  }
+});
+
 async function uploadFlight(file) {
   const formData = new FormData();
   formData.append("igc", file, file.name);
@@ -223,6 +237,9 @@ function renderFlight(flight) {
   currentSegments = buildRouteSegments(currentPath, currentSamples);
 
   buildPathMetrics(currentPath);
+  totalHorizontalDistanceM = computeHorizontalTrackDistanceM(currentSamples);
+  currentFlightDurationMs = computeFlightDurationMs(currentSamples);
+  currentFlightSummary = flight;
   playbackProgress = 0;
   playBtn.disabled = false;
   playBtn.textContent = "Play";
@@ -258,7 +275,13 @@ function renderFlight(flight) {
   );
 
   renderInfo(flight);
-  updateReplayStats({ speedKmh: 0, climbRateMs: 0, progress: 0, elapsedSec: 0 });
+  updateReplayStats({
+    speedKmh: 0,
+    climbRateMs: 0,
+    xcSpeedKmh: 0,
+    progress: 0,
+    elapsedSec: 0,
+  });
 }
 
 function renderDeckLayers(path, marker, detail, revealTrack) {
@@ -288,9 +311,9 @@ function renderDeckLayers(path, marker, detail, revealTrack) {
         pickable: false,
         getPosition: (d) => d.position,
         getAngle: (d) => d.angle || 0,
-        getIcon: () => paragliderIcon,
+        getIcon: () => sailplaneIcon,
         sizeUnits: "meters",
-        getSize: 95,
+        getSize: 120,
         sizeMinPixels: 28,
         sizeMaxPixels: 64,
         billboard: false,
@@ -332,22 +355,22 @@ function rerenderTrackForCurrentState() {
   renderDeckLayers(currentPath, markerFromDetail(detail), detail, revealTrack);
 }
 
-function createParagliderIcon() {
+function createSailplaneIcon() {
   const svg = `
 <svg xmlns="http://www.w3.org/2000/svg" width="96" height="96" viewBox="0 0 96 96">
-  <path d="M8 40 C24 12, 72 12, 88 40 L80 42 C66 24, 30 24, 16 42 Z" fill="#111111"/>
-  <line x1="30" y1="40" x2="46" y2="66" stroke="#dbe4f3" stroke-width="2.8"/>
-  <line x1="66" y1="40" x2="50" y2="66" stroke="#dbe4f3" stroke-width="2.8"/>
-  <ellipse cx="48" cy="74" rx="7" ry="9" fill="#f8fafc"/>
-  <circle cx="48" cy="62" r="3.8" fill="#f8fafc"/>
-  <line x1="48" y1="66" x2="48" y2="83" stroke="#f8fafc" stroke-width="2"/>
+  <path d="M10 46 L86 46 L84 52 L12 52 Z" fill="#1a1a2e"/>
+  <path d="M44 14 L52 14 L55 70 L41 70 Z" fill="#2d3748"/>
+  <ellipse cx="48" cy="20" rx="6" ry="9" fill="#4a5568"/>
+  <path d="M36 66 L60 66 L58 76 L38 76 Z" fill="#1a1a2e"/>
+  <path d="M46 70 L50 70 L48 88 L48 88 Z" fill="#2d3748"/>
 </svg>`;
   return {
-    id: "paraglider",
+    id: "sailplane",
     url: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
     width: 96,
     height: 96,
-    anchorY: 72,
+    anchorX: 48,
+    anchorY: 48,
   };
 }
 
@@ -627,7 +650,13 @@ function interpolatePathDetailed(path, cumulative, totalDistance, progress) {
 
 function computePlaybackStats(detail) {
   if (!currentSamples.length || detail.segIndex <= 0 || detail.segIndex >= currentSamples.length) {
-    return { speedKmh: 0, climbRateMs: 0, progress: playbackProgress, elapsedSec: 0 };
+    return {
+      speedKmh: 0,
+      climbRateMs: 0,
+      xcSpeedKmh: 0,
+      progress: playbackProgress,
+      elapsedSec: 0,
+    };
   }
 
   const prev = currentSamples[detail.segIndex - 1];
@@ -639,8 +668,10 @@ function computePlaybackStats(detail) {
   const tMs = prev.timeMs + (next.timeMs - prev.timeMs) * detail.segT;
   const climbRateMs = computeWindowedClimbRateMs(tMs, detail.segIndex, 8000);
   const elapsedSec = Math.max((tMs - currentSamples[0].timeMs) / 1000, 0);
+  const distanceM = computeHorizontalDistanceToDetail(detail);
+  const xcSpeedKmh = elapsedSec > 0 ? (distanceM / elapsedSec) * 3.6 : 0;
 
-  return { speedKmh, climbRateMs, progress: playbackProgress, elapsedSec };
+  return { speedKmh, climbRateMs, xcSpeedKmh, progress: playbackProgress, elapsedSec };
 }
 
 /**
@@ -680,21 +711,107 @@ function computeWindowedClimbRateMs(centerTimeMs, segIndex, windowMs) {
 function updateReplayStats(stats) {
   const speedEl = document.getElementById("speedValue");
   const climbEl = document.getElementById("climbValue");
+  const xcEl = document.getElementById("xcSpeedValue");
   const progressEl = document.getElementById("progressValue");
   const elapsedEl = document.getElementById("elapsedValue");
   if (!speedEl || !climbEl || !progressEl || !elapsedEl) {
     return;
   }
 
-  speedEl.textContent = `${stats.speedKmh.toFixed(1)} km/h`;
+  speedEl.textContent = formatSpeed(stats.speedKmh);
   climbEl.textContent = formatClimbRate(stats.climbRateMs);
+  if (xcEl) {
+    xcEl.textContent = formatXCSpeed(stats.xcSpeedKmh);
+  }
   progressEl.textContent = `${(stats.progress * 100).toFixed(1)}%`;
   elapsedEl.textContent = formatDuration(stats.elapsedSec);
 }
 
+function isAustralianUnits() {
+  return (unitsSelect?.value || "australian") === "australian";
+}
+
+function formatSpeed(speedKmh) {
+  const kmh = Number(speedKmh || 0);
+  if (isAustralianUnits()) {
+    return `${(kmh * MS_TO_KT / 3.6).toFixed(1)} kt`;
+  }
+  return `${kmh.toFixed(1)} km/h`;
+}
+
 function formatClimbRate(climbRateMs) {
   const rateMs = Number(climbRateMs || 0);
+  if (isAustralianUnits()) {
+    return `${(rateMs * MS_TO_KT).toFixed(2)} kt`;
+  }
   return `${rateMs.toFixed(1)} m/s`;
+}
+
+function formatXCSpeed(xcSpeedKmh) {
+  return `${Number(xcSpeedKmh || 0).toFixed(1)} km/h`;
+}
+
+function formatBestClimb(maxClimbMs) {
+  return formatClimbRate(maxClimbMs);
+}
+
+function unitLabels() {
+  if (isAustralianUnits()) {
+    return {
+      bestClimb: "Best climb (Vz max)",
+      speed: "Speed (kt)",
+      climb: "Climb (kt)",
+      xc: "XC speed (km/h)",
+      avgXc: "Avg XC speed (km/h)",
+    };
+  }
+  return {
+    bestClimb: "Best climb (Vz max)",
+    speed: "Speed (km/h)",
+    climb: "Climb (m/s)",
+    xc: "XC speed (km/h)",
+    avgXc: "Avg XC speed (km/h)",
+  };
+}
+
+function computeFlightDurationMs(samples) {
+  if (!samples.length) {
+    return FALLBACK_PLAYBACK_DURATION_MS;
+  }
+  const duration = samples[samples.length - 1].timeMs - samples[0].timeMs;
+  return Math.max(duration, 1000);
+}
+
+function computeHorizontalTrackDistanceM(samples) {
+  let total = 0;
+  for (let i = 1; i < samples.length; i++) {
+    total += haversineMeters(
+      samples[i - 1].lat,
+      samples[i - 1].lon,
+      samples[i].lat,
+      samples[i].lon
+    );
+  }
+  return total;
+}
+
+function computeHorizontalDistanceToDetail(detail) {
+  if (!currentSamples.length || detail.segIndex <= 0) {
+    return 0;
+  }
+
+  let total = 0;
+  const endIdx = Math.min(detail.segIndex, currentSamples.length - 1);
+  for (let i = 1; i < endIdx; i++) {
+    const a = currentSamples[i - 1];
+    const b = currentSamples[i];
+    total += haversineMeters(a.lat, a.lon, b.lat, b.lon);
+  }
+
+  const prev = currentSamples[endIdx - 1];
+  const next = currentSamples[endIdx];
+  total += haversineMeters(prev.lat, prev.lon, next.lat, next.lon) * detail.segT;
+  return total;
 }
 
 function distance3D(a, b) {
@@ -744,6 +861,11 @@ function renderInfo(flight) {
   const end = formatDate(flight.endTime);
   const maxRate = Number(flight.MaxClimb || 0);
   const maxAlt = flight.MaxAlt;
+  const labels = unitLabels();
+  const flightDurationSec = currentFlightDurationMs / 1000;
+  const avgXcKmh =
+    flightDurationSec > 0 ? (totalHorizontalDistanceM / flightDurationSec) * 3.6 : 0;
+  const distanceKm = (totalHorizontalDistanceM / 1000).toFixed(1);
 
   info.innerHTML = `
     <div><span class="k">File:</span> <span class="v">${escapeHtml(flight.file)}</span></div>
@@ -751,13 +873,17 @@ function renderInfo(flight) {
     <div><span class="k">Glider:</span> <span class="v">${escapeHtml(glider)}</span></div>
     <div><span class="k">Start:</span> <span class="v">${escapeHtml(start)}</span></div>
     <div><span class="k">End:</span> <span class="v">${escapeHtml(end)}</span></div>
-    <div><span class="k">Max Climb Rate:</span> <span class="v">${escapeHtml(formatClimbRate(maxRate))}</span></div>
-    <div><span class="k">Max. altitude (MSL):</span> <span class="v">${escapeHtml(maxAlt)}</span></div>
+    <div><span class="k">Flight time:</span> <span class="v">${escapeHtml(formatDuration(flightDurationSec))}</span></div>
+    <div><span class="k">Track distance:</span> <span class="v">${escapeHtml(distanceKm)} km</span></div>
+    <div><span class="k">${escapeHtml(labels.avgXc)}:</span> <span class="v">${escapeHtml(formatXCSpeed(avgXcKmh))}</span></div>
+    <div><span class="k">${escapeHtml(labels.bestClimb)}:</span> <span class="v">${escapeHtml(formatBestClimb(maxRate))}</span></div>
+    <div><span class="k">Max altitude (MSL):</span> <span class="v">${escapeHtml(String(maxAlt))} m</span></div>
     <hr />
     <div><span class="k">Replay progress:</span> <span class="v" id="progressValue">0.0%</span></div>
     <div><span class="k">Replay elapsed:</span> <span class="v" id="elapsedValue">00:00:00</span></div>
-    <div><span class="k">Speed:</span> <span class="v" id="speedValue">0.0 km/h</span></div>
-    <div><span class="k">Climb rate:</span> <span class="v" id="climbValue">0.0 m/s</span></div>
+    <div><span class="k">${escapeHtml(labels.speed)}:</span> <span class="v" id="speedValue">—</span></div>
+    <div><span class="k">${escapeHtml(labels.climb)}:</span> <span class="v" id="climbValue">—</span></div>
+    <div><span class="k">${escapeHtml(labels.xc)}:</span> <span class="v" id="xcSpeedValue">—</span></div>
   `;
 }
 
@@ -770,9 +896,11 @@ function formatDuration(totalSeconds) {
 }
 
 function getPlaybackDurationMs() {
-  const speed = Number(playbackSpeedSelect?.value || "1");
+  const speed = Number(playbackSpeedSelect?.value || "10");
   const clampedSpeed = Math.max(0.1, speed);
-  return BASE_PLAYBACK_DURATION_MS / clampedSpeed;
+  const baseDuration =
+    currentFlightDurationMs > 0 ? currentFlightDurationMs : FALLBACK_PLAYBACK_DURATION_MS;
+  return baseDuration / clampedSpeed;
 }
 
 function isFollowCamEnabled() {
